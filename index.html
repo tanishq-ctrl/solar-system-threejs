@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Enhanced Solar System – Improved Fly-Through & Clamped Sun</title>
+    <style>
+      /* Radial gradient background for depth */
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: radial-gradient(circle, #000428, #004e92);
+      }
+      canvas { display: block; }
+      /* dat.GUI styling */
+      .dg.main {
+        background: rgba(0,0,0,0.8) !important;
+      }
+      .dg.main .c, .dg.main .cr { color: #fff !important; }
+      .dg.main .property-name { font-size: 14px; }
+    </style>
+    <!-- Import map for Three.js -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.128.0/build/three.module.js"
+        }
+      }
+    </script>
+    <!-- Include dat.GUI -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+    <!-- Include Tween.js as an ES module -->
+    <script type="module">
+      import TWEEN from "https://unpkg.com/@tweenjs/tween.js@18.6.4/dist/tween.esm.js";
+      window.TWEEN = TWEEN;
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js";
+      import { EffectComposer } from "https://unpkg.com/three@0.128.0/examples/jsm/postprocessing/EffectComposer.js";
+      import { RenderPass } from "https://unpkg.com/three@0.128.0/examples/jsm/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "https://unpkg.com/three@0.128.0/examples/jsm/postprocessing/UnrealBloomPass.js";
+
+      // ------------------ GUI Parameters and Globals ------------------
+      const params = {
+        bloomStrength: 1.5,
+        simSpeed: 100,             // ms update interval for sun simulation
+        sunRotationSpeed: 0.005,
+        sunDistortion: 0.2,
+        cameraAnimation: true,
+        cameraSpeed: 0.001,
+        cameraMode: "orbit",       // "orbit" or "flyThrough"
+        playAudio: function() {
+          if (audio && !audio.isPlaying) audio.play();
+        }
+      };
+
+      let isZoomed = false;  // When zoomed in, disable automatic camera movement.
+      const defaultCameraRadius = 100;
+      const defaultCameraAngle = 0;
+      let cameraAngle = defaultCameraAngle;
+      let flyT = 0; // Parameter for fly-through mode
+
+      // Additional GUI for manual zoom selection.
+      const zoomControl = {
+        selectedPlanet: "None",
+        zoom: function() {
+          if (zoomControl.selectedPlanet === "None") {
+            zoomOut();
+          } else {
+            const planet = getPlanetByName(zoomControl.selectedPlanet);
+            if (planet) zoomToPlanet(planet);
+          }
+        }
+      };
+
+      // ------------------ Audio Setup & Analyser ------------------
+      const listener = new THREE.AudioListener();
+      if (!listener.context) {
+        listener.context = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const audio = new THREE.Audio(listener);
+      const audioLoader = new THREE.AudioLoader();
+      audioLoader.load('Kendrick Lamar - tv off (Official Audio) [U8F5G5wR1mk].mp3', function(buffer) {
+        audio.setBuffer(buffer);
+        audio.setLoop(true);
+        audio.setVolume(0.5);
+      });
+      const analyser = new THREE.AudioAnalyser(audio, 256);
+      document.body.addEventListener('click', () => {
+        if (listener.context.state === 'suspended') listener.context.resume();
+      });
+
+      // ------------------ Fly-Through Path ------------------
+      // Define a closed Catmull–Rom curve that starts near the sun,
+      // passes by each planet in order (Mercury → Neptune), then returns to the sun.
+      const flyThroughPath = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(8, 0, 0),      // Near sun
+        new THREE.Vector3(14, 3, 2),     // Near Mercury (orbit 14)
+        new THREE.Vector3(18, -2, 3),    // Near Venus (orbit 18)
+        new THREE.Vector3(22, 4, -1),    // Near Earth (orbit 22)
+        new THREE.Vector3(26, -3, -2),   // Near Mars (orbit 26)
+        new THREE.Vector3(32, 2, 1),     // Near Jupiter (orbit 32)
+        new THREE.Vector3(38, -2, 2),    // Near Saturn (orbit 38)
+        new THREE.Vector3(44, 3, -3),    // Near Uranus (orbit 44)
+        new THREE.Vector3(50, -1, 0),    // Near Neptune (orbit 50)
+        new THREE.Vector3(50, 0, 0),     // Turnaround point near Neptune
+        new THREE.Vector3(8, 0, 0)       // Return to near sun
+      ], true);
+
+      // ------------------ Sun Simulation ------------------
+      const gridCols = 100, gridRows = 100, cellSize = 5;
+      const canvasWidth = gridCols * cellSize, canvasHeight = gridRows * cellSize;
+      const lifeCanvas = document.createElement('canvas');
+      lifeCanvas.width = canvasWidth;
+      lifeCanvas.height = canvasHeight;
+      const ctx = lifeCanvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+
+      let grid = [], nextGrid = [];
+      for (let x = 0; x < gridCols; x++) {
+        grid[x] = [];
+        nextGrid[x] = [];
+        for (let y = 0; y < gridRows; y++) {
+          grid[x][y] = Math.random() < 0.2 ? 1 : 0;
+          nextGrid[x][y] = 0;
+        }
+      }
+      function countNeighbors(x, y) {
+        let count = 0;
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= 1; j++) {
+            if (i === 0 && j === 0) continue;
+            const col = (x + i + gridCols) % gridCols;
+            const row = (y + j + gridRows) % gridRows;
+            count += grid[col][row];
+          }
+        }
+        return count;
+      }
+      function updateSimulation() {
+        for (let x = 0; x < gridCols; x++) {
+          for (let y = 0; y < gridRows; y++) {
+            const alive = grid[x][y];
+            const neighbors = countNeighbors(x, y);
+            nextGrid[x][y] = alive ? ((neighbors === 2 || neighbors === 3) ? 1 : 0)
+                                   : ((neighbors === 3) ? 1 : 0);
+          }
+        }
+        [grid, nextGrid] = [nextGrid, grid];
+      }
+      let frameCount = 0;
+      function drawLife() {
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+        for (let x = 0; x < gridCols; x++) {
+          for (let y = 0; y < gridRows; y++) {
+            if (grid[x][y] === 1) {
+              const hue = (frameCount + x * 3 + y * 3) % 360;
+              ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+              ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            }
+          }
+        }
+      }
+      const sunTexture = new THREE.CanvasTexture(lifeCanvas);
+      sunTexture.minFilter = THREE.NearestFilter;
+      sunTexture.magFilter = THREE.NearestFilter;
+
+      // ------------------ Sun Shader ------------------
+      const vertexShader = `
+        uniform float time;
+        uniform float distortion;
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vec3 pos = position;
+          pos += normal * sin(time + position.y * 10.0) * distortion;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        }
+      `;
+      const fragmentShader = `
+        uniform sampler2D map;
+        uniform float time;
+        uniform float distortion;
+        uniform vec3 baseColor;
+        varying vec2 vUv;
+        void main() {
+          vec2 uv = vUv;
+          uv.x += 0.02 * distortion * sin(10.0 * uv.y + time);
+          uv.y += 0.02 * distortion * cos(10.0 * uv.x + time);
+          vec4 simColor = texture2D(map, uv);
+          float lum = dot(simColor.rgb, vec3(0.333));
+          vec3 colorOrange = vec3(1.0, 0.5, 0.0);
+          vec3 colorYellow = vec3(1.0, 1.0, 0.0);
+          vec3 ramp = mix(colorOrange, colorYellow, smoothstep(0.2, 0.5, lum));
+          vec3 finalColor = mix(simColor.rgb, ramp, 0.7);
+          finalColor *= baseColor;
+          gl_FragColor = vec4(finalColor, simColor.a);
+        }
+      `;
+      const sunUniforms = {
+        time: { value: 0 },
+        map: { value: sunTexture },
+        distortion: { value: params.sunDistortion },
+        baseColor: { value: new THREE.Color(0xFFFF00) }
+      };
+      const sunMaterial = new THREE.ShaderMaterial({
+        uniforms: sunUniforms,
+        vertexShader: vertexShader,
+        fragmentShader: fragmentShader
+      });
+      const sunGeometry = new THREE.SphereGeometry(5, 64, 64);
+      const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+
+      // ------------------ Planets Setup ------------------
+      // Increase orbit radii so that orbits are farther from the sun.
+      const loader = new THREE.TextureLoader();
+      const planetsData = [
+        { name: "Mercury", orbitRadius: 14, size: 0.75, orbitSpeed: 0.02, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/mercury.jpg", tint: 0xaaaaaa },
+        { name: "Venus",   orbitRadius: 18, size: 1.05, orbitSpeed: 0.015, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/venus.jpg", tint: 0xffd1a4 },
+        { name: "Earth",   orbitRadius: 22, size: 1.125, orbitSpeed: 0.01, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/earth.jpg", tint: 0x88ccff },
+        { name: "Mars",    orbitRadius: 26, size: 0.9, orbitSpeed: 0.008, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/mars.jpg", tint: 0xff5533 },
+        { name: "Jupiter", orbitRadius: 32, size: 2.25, orbitSpeed: 0.005, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/jupiter.jpg", tint: 0xd2b48c },
+        { name: "Saturn",  orbitRadius: 38, size: 1.8, orbitSpeed: 0.004, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/saturn.jpg", tint: 0xf4a460 },
+        { name: "Uranus",  orbitRadius: 44, size: 1.35, orbitSpeed: 0.003, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/uranus.jpg", tint: 0x66ccff },
+        { name: "Neptune", orbitRadius: 50, size: 1.35, orbitSpeed: 0.002, texture: "https://raw.githubusercontent.com/KyleGough/solar-system/master/static/textures/neptune.jpg", tint: 0x3366ff }
+      ];
+      const solarSystem = new THREE.Group();
+      for (let i = 0; i < planetsData.length; i++) {
+        const data = planetsData[i];
+        const pivot = new THREE.Object3D();
+        pivot.rotation.y = i * (2 * Math.PI / planetsData.length);
+        const geometry = new THREE.SphereGeometry(data.size, 32, 32);
+        const material = new THREE.MeshStandardMaterial({
+          map: loader.load(data.texture),
+          emissive: 0x222222,
+          emissiveIntensity: 0.2
+        });
+        material.color.setHex(data.tint);
+        const planetMesh = new THREE.Mesh(geometry, material);
+        planetMesh.userData.planet = true;
+        planetMesh.userData.name = data.name;
+        planetMesh.position.x = data.orbitRadius;
+        pivot.add(planetMesh);
+        pivot.userData.orbitSpeed = data.orbitSpeed;
+        solarSystem.add(pivot);
+      }
+
+      // ------------------ Orbit Rings ------------------
+      function createOrbitRing(radius) {
+        const curve = new THREE.EllipseCurve(0, 0, radius, radius, 0, 2 * Math.PI, false, 0);
+        const points = curve.getPoints(64);
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+        const orbit = new THREE.LineLoop(geometry, material);
+        orbit.rotation.x = Math.PI / 2;
+        return orbit;
+      }
+      const orbitsGroup = new THREE.Group();
+      for (const data of planetsData) {
+        const orbit = createOrbitRing(data.orbitRadius);
+        orbitsGroup.add(orbit);
+      }
+
+      // ------------------ Scene Setup ------------------
+      const scene = new THREE.Scene();
+      scene.add(sun);
+      scene.add(solarSystem);
+      scene.add(orbitsGroup);
+
+      // ------------------ Lighting ------------------
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(10, 10, 10);
+      scene.add(directionalLight);
+
+      // ------------------ Starfield ------------------
+      const starsGeometry = new THREE.BufferGeometry();
+      const starCount = 1000;
+      const starPositions = new Float32Array(starCount * 3);
+      for (let i = 0; i < starCount; i++) {
+        starPositions[i * 3] = (Math.random() - 0.5) * 200;
+        starPositions[i * 3 + 1] = (Math.random() - 0.5) * 200;
+        starPositions[i * 3 + 2] = (Math.random() - 0.5) * 200;
+      }
+      starsGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+      const starsMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 });
+      const starField = new THREE.Points(starsGeometry, starsMaterial);
+      scene.add(starField);
+
+      // ------------------ Camera, Renderer, Controls ------------------
+      const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.z = defaultCameraRadius;
+      camera.add(listener);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+
+      // ------------------ Post-Processing ------------------
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight),
+                                              params.bloomStrength, 0.4, 0.85);
+      composer.addPass(bloomPass);
+
+      // ------------------ dat.GUI Controls ------------------
+      const gui = new dat.GUI();
+      gui.add(params, 'bloomStrength', 0, 3).onChange(value => { bloomPass.strength = value; });
+      gui.add(params, 'simSpeed', 10, 1000).name('Sun Simulation Speed (ms)');
+      gui.add(params, 'sunRotationSpeed', 0, 0.05).name('Sun Rotation');
+      gui.add(params, 'sunDistortion', 0, 1).name('Sun Distortion').onChange(value => { sunUniforms.distortion.value = value; });
+      gui.add(params, 'cameraAnimation').name('Camera Animation');
+      gui.add(params, 'cameraSpeed', 0.0001, 0.01).name('Camera Speed');
+      gui.add(params, 'cameraMode', ["orbit", "flyThrough"]).name("Camera Mode").onChange(mode => {
+        if (mode === "flyThrough") {
+          flyT = 0;
+          new TWEEN.Tween(camera.position)
+            .to({ x: 40, y: 20, z: 40 }, 2000)
+            .easing(TWEEN.Easing.Quadratic.Out)
+            .start();
+        } else {
+          zoomOut();
+        }
+      });
+      gui.add(params, 'playAudio').name('Play Audio');
+      gui.add(zoomControl, 'selectedPlanet', ["None", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]).name("Zoom To Planet");
+      gui.add(zoomControl, 'zoom').name("Execute Zoom");
+
+      // ------------------ Zoom Feature ------------------
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      renderer.domElement.addEventListener('dblclick', onDocumentDoubleClick, false);
+      
+      function onDocumentDoubleClick(event) {
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(solarSystem.children, true);
+        if (intersects.length > 0) {
+          let planetMesh = intersects[0].object;
+          while (planetMesh && !planetMesh.userData.planet) {
+            planetMesh = planetMesh.parent;
+          }
+          if (planetMesh) {
+            zoomToPlanet(planetMesh);
+            return;
+          }
+        }
+        zoomOut();
+      }
+      
+      function zoomToPlanet(planetMesh) {
+        isZoomed = true;
+        params.cameraAnimation = false;
+        const targetPos = new THREE.Vector3();
+        planetMesh.getWorldPosition(targetPos);
+        const newCameraPos = targetPos.clone().add(new THREE.Vector3(0, 0, 15));
+        new TWEEN.Tween(camera.position)
+          .to({ x: newCameraPos.x, y: newCameraPos.y, z: newCameraPos.z }, 1500)
+          .easing(TWEEN.Easing.Quadratic.Out)
+          .start();
+        new TWEEN.Tween(controls.target)
+          .to({ x: targetPos.x, y: targetPos.y, z: targetPos.z }, 1500)
+          .easing(TWEEN.Easing.Quadratic.Out)
+          .start();
+      }
+      
+      function zoomOut() {
+        isZoomed = false;
+        params.cameraAnimation = true;
+        cameraAngle = defaultCameraAngle;
+        new TWEEN.Tween(camera.position)
+          .to({ x: defaultCameraRadius * Math.cos(cameraAngle), z: defaultCameraRadius * Math.sin(cameraAngle) }, 1500)
+          .easing(TWEEN.Easing.Quadratic.Out)
+          .start();
+        new TWEEN.Tween(controls.target)
+          .to({ x: 0, y: 0, z: 0 }, 1500)
+          .easing(TWEEN.Easing.Quadratic.Out)
+          .start();
+      }
+      
+      function getPlanetByName(name) {
+        for (let i = 0; i < solarSystem.children.length; i++) {
+          const pivot = solarSystem.children[i];
+          const planetMesh = pivot.children.find(child => child.userData && child.userData.planet && child.userData.name === name);
+          if (planetMesh) return planetMesh;
+        }
+        return null;
+      }
+      
+      function frameCountIncrement() { frameCount++; }
+      
+      zoomControl.zoom = function() {
+        if (zoomControl.selectedPlanet === "None") zoomOut();
+        else {
+          const planet = getPlanetByName(zoomControl.selectedPlanet);
+          if (planet) zoomToPlanet(planet);
+        }
+      };
+
+      // ------------------ Animation Loop ------------------
+      let lastSimUpdate = 0;
+      function animate() {
+        requestAnimationFrame(animate);
+        TWEEN.update();
+        const now = Date.now();
+        if (now - lastSimUpdate > params.simSpeed) {
+          updateSimulation();
+          frameCountIncrement();
+          drawLife();
+          sunTexture.needsUpdate = true;
+          lastSimUpdate = now;
+        }
+        // Audio-Reactive: Get average frequency.
+        let avg = analyser.getAverageFrequency();
+        // Aggressively modulate the sun's distortion and scale,
+        // but clamp the sun scale so that it doesn't exceed 2.5.
+        sunUniforms.distortion.value = params.sunDistortion * (1 + avg / 128);
+        let sunScale = 1 + avg / 50;
+        sunScale = Math.min(sunScale, 2.5);
+        sun.scale.set(sunScale, sunScale, sunScale);
+        
+        const elapsedTime = performance.now() / 1000;
+        sunUniforms.time.value = elapsedTime;
+        sun.rotation.y += params.sunRotationSpeed;
+        for (const pivot of solarSystem.children) {
+          pivot.rotation.y += pivot.userData.orbitSpeed;
+        }
+        // Camera Path Editing: Choose between orbit and fly-through.
+        if (!isZoomed) {
+          if (params.cameraMode === "orbit" && params.cameraAnimation) {
+            cameraAngle += params.cameraSpeed;
+            camera.position.x = defaultCameraRadius * Math.cos(cameraAngle);
+            camera.position.z = defaultCameraRadius * Math.sin(cameraAngle);
+            camera.lookAt(scene.position);
+            controls.target.copy(scene.position);
+          } else if (params.cameraMode === "flyThrough" && params.cameraAnimation) {
+            flyT += params.cameraSpeed;
+            if (flyT > 1) flyT = 0;
+            let newPos = flyThroughPath.getPointAt(flyT);
+            let lookAtPos = flyThroughPath.getPointAt((flyT + 0.01) % 1);
+            camera.position.copy(newPos);
+            camera.lookAt(lookAtPos);
+            controls.target.copy(lookAtPos);
+          }
+        }
+        controls.update();
+        composer.render();
+      }
+      animate();
+
+      // ------------------ Handle Window Resize ------------------
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        composer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // ------------------ Play Audio on Click ------------------
+      window.addEventListener('click', () => {
+        if (audio && !audio.isPlaying) audio.play();
+      });
+    </script>
+  </body>
+</html>
