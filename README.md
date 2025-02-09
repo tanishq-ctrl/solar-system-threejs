@@ -9,6 +9,11 @@ Welcome to the **Enhanced Solar System** project – an immersive, interactive s
 
 ---
 
+<p align="center">
+  <img src="https://github.com/tanishq-ctrl/solar-system-threejs/blob/main/solar.gif" alt="Solar System">
+</p>
+
+
 ## Table of Contents
 
 - [Features](#features)
@@ -49,22 +54,6 @@ Welcome to the **Enhanced Solar System** project – an immersive, interactive s
 
 - **Live Controls via dat.GUI:**  
   Adjust simulation parameters on the fly, including bloom strength, sun simulation speed, rotation, distortion, camera settings, and audio playback.
-
----
-
-## Screenshots
-
-### Main Scene
-![Solar System Scene](https://via.placeholder.com/800x400?text=Solar+System+Scene)
-
-*Explore the vibrant scene with orbiting planets, a dynamically simulated sun, and a starfield backdrop.*
-
-### GUI Controls
-![GUI Controls](https://via.placeholder.com/400x300?text=dat.GUI+Interface)
-
-*Easily adjust parameters like camera speed, bloom strength, and sun distortion.*
-
-*(Replace the placeholder images with actual screenshots from your project if available.)*
 
 ---
 
