@@ -13,7 +13,7 @@ Welcome to the **Enhanced Solar System** project – an immersive, interactive s
   <img src="https://github.com/tanishq-ctrl/solar-system-threejs/blob/main/solar.gif" alt="Solar System">
 </p>
 
-
+![CLICK HERE TO SEE IT LIVE](https://tanishq-ctrl.github.io/solar-system-threejs/)
 ## Table of Contents
 
 - [Features](#features)
